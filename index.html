@@ -1,0 +1,1939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Minecraft Baseball</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;user-select:none;-webkit-user-select:none;touch-action:none}
+canvas{display:block;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);image-rendering:pixelated;image-rendering:crisp-edges}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+// =============================================================================
+// CANVAS SETUP
+// =============================================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 960, H = 640;
+canvas.width = W; canvas.height = H;
+ctx.imageSmoothingEnabled = false;
+
+function resizeCanvas() {
+    const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+    canvas.style.width = (W * s) + 'px';
+    canvas.style.height = (H * s) + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+const C = {
+    SKY_TOP: '#5BA4D9', SKY_BOT: '#A8D8F0',
+    GRASS: '#5D9B3C', GRASS2: '#4A8030', GRASS3: '#6DAF4A',
+    DIRT: '#866043', DIRT_LIGHT: '#C4A46C', DIRT_DARK: '#6B4C34',
+    STEVE_HAIR: '#3B2213', STEVE_SKIN: '#C6956A', STEVE_SHIRT: '#00AAAA',
+    STEVE_SHIRT2: '#009090', STEVE_PANTS: '#2B2B8B', STEVE_PANTS2: '#1F1F6B',
+    ZOMBIE_SKIN: '#5B8731', ZOMBIE_DARK: '#4A6B28',
+    SKEL_BONE: '#C8C8B0', SKEL_DARK: '#8A8A78',
+    CREEP_GREEN: '#5FA83A', CREEP_DARK: '#3B6B20', CREEP_BLACK: '#1A1A1A',
+    ENDER_BLACK: '#161616', ENDER_PURPLE: '#CC00FF', ENDER_EYES: '#FF00FF',
+    BALL_WHITE: '#F0F0F0', BALL_RED: '#CC0000',
+    BAT_LIGHT: '#D4AD6A', BAT_DARK: '#8B6D3C',
+    WHITE: '#FFFFFF', BLACK: '#000000', YELLOW: '#FFFF00',
+    GOLD: '#FFD700', RED: '#FF3333', GREEN: '#33FF33',
+    ORANGE: '#FF8800', CYAN: '#00FFFF', GRAY: '#888888',
+    STONE: '#7F7F7F', STONE_DARK: '#595959',
+    FENCE_GREEN: '#2D5A1E', FENCE_DARK: '#1A3B10',
+    SUN: '#FFEE88', SUN_BORDER: '#FFD700',
+};
+
+// Pitch settings
+const PITCH_FRAMES = { fastball: 50, curveball: 58, changeup: 65, enderpearl: 52 };
+const PITCH_MOVE = {
+    fastball:   { dx: 0, dy: 0 },
+    curveball:  { dx: 0.15, dy: 0.25 },
+    changeup:   { dx: 0, dy: 0.05 },
+    enderpearl: { dx: 0, dy: 0 },
+};
+
+// Swing settings
+const SWING_FRAMES = 14;
+const CONTACT_FRAME = 6;
+const CONTACT_WINDOW = 0.24;
+const PERFECT_T = 0.06;
+const GOOD_T = 0.12;
+const OK_T = 0.18;
+
+// Hit outcome tables: [outcome, weight]
+const HIT_TABLE = {
+    perfect: [['homerun',40],['triple',12],['double',22],['single',21],['out',5]],
+    good:    [['homerun',18],['triple',8],['double',18],['single',31],['out',25]],
+    ok:      [['homerun',5],['triple',5],['double',12],['single',23],['out',55]],
+    weak:    [['foul',40],['single',12],['double',3],['out',45]],
+};
+
+const PITCHERS = ['zombie','skeleton','creeper','enderman'];
+const PITCH_TYPES = {
+    zombie:    ['changeup','changeup','fastball'],
+    skeleton:  ['fastball','fastball','curveball'],
+    creeper:   ['curveball','curveball','changeup'],
+    enderman:  ['enderpearl','fastball','curveball'],
+};
+
+const ENCOURAGE = [
+    'DIAMOND HIT!','ENCHANTED BAT!','CRITICAL HIT!','TNT POWER!',
+    'IRON SWING!','SUPER HIT!','CRAFTED!','FULL HEARTS!',
+    'POWER III!','FORTUNE III!','SHARPNESS V!','UNBREAKING!',
+    'LEGENDARY!','EPIC LOOT!','LEVEL UP!',
+];
+const HR_MSGS = [
+    'OUTTA HERE!','GONE GONE GONE!','SEE YA!','NETHER PORTAL SHOT!',
+    'TO THE END!','OVER THE FENCE!','GOODBYE BALL!','MONSTER HR!',
+];
+const STRIKE_MSGS = ['STRIKE!','WHIFF!','SWING AND A MISS!','NOPE!'];
+
+// =============================================================================
+// UTILITIES
+// =============================================================================
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function randFloat(a, b) { return a + Math.random() * (b - a); }
+function randInt(a, b) { return Math.floor(randFloat(a, b + 1)); }
+function pick(arr) { return arr[randInt(0, arr.length - 1)]; }
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+function easeInQuad(t) { return t * t; }
+function easeOutBounce(t) {
+    if (t < 1/2.75) return 7.5625*t*t;
+    if (t < 2/2.75) { t-=1.5/2.75; return 7.5625*t*t+0.75; }
+    if (t < 2.5/2.75) { t-=2.25/2.75; return 7.5625*t*t+0.9375; }
+    t-=2.625/2.75; return 7.5625*t*t+0.984375;
+}
+function weightedPick(table) {
+    const total = table.reduce((s, e) => s + e[1], 0);
+    let r = Math.random() * total;
+    for (const [outcome, weight] of table) { r -= weight; if (r <= 0) return outcome; }
+    return table[table.length-1][0];
+}
+
+// =============================================================================
+// PIXEL FONT (5x7 bitmap)
+// =============================================================================
+const FONT = {};
+const fd = {
+    A:[14,17,17,31,17,17,17],B:[30,17,17,30,17,17,30],C:[14,17,16,16,16,17,14],
+    D:[30,17,17,17,17,17,30],E:[31,16,16,30,16,16,31],F:[31,16,16,30,16,16,16],
+    G:[14,17,16,23,17,17,14],H:[17,17,17,31,17,17,17],I:[14,4,4,4,4,4,14],
+    J:[7,2,2,2,2,18,12],K:[17,18,20,24,20,18,17],L:[16,16,16,16,16,16,31],
+    M:[17,27,21,17,17,17,17],N:[17,25,21,19,17,17,17],O:[14,17,17,17,17,17,14],
+    P:[30,17,17,30,16,16,16],Q:[14,17,17,17,21,18,13],R:[30,17,17,30,20,18,17],
+    S:[14,17,16,14,1,17,14],T:[31,4,4,4,4,4,4],U:[17,17,17,17,17,17,14],
+    V:[17,17,17,17,10,10,4],W:[17,17,17,17,21,27,17],X:[17,17,10,4,10,17,17],
+    Y:[17,17,10,4,4,4,4],Z:[31,1,2,4,8,16,31],
+    '0':[14,17,19,21,25,17,14],'1':[4,12,4,4,4,4,14],'2':[14,17,1,6,8,16,31],
+    '3':[14,17,1,6,1,17,14],'4':[17,17,17,31,1,1,1],'5':[31,16,16,30,1,17,14],
+    '6':[14,17,16,30,17,17,14],'7':[31,1,2,4,8,8,8],'8':[14,17,17,14,17,17,14],
+    '9':[14,17,17,15,1,17,14],
+    ' ':[0,0,0,0,0,0,0],'!':[4,4,4,4,4,0,4],'.':[0,0,0,0,0,0,4],
+    ':':[0,4,4,0,4,4,0],'-':[0,0,0,14,0,0,0],'/':[1,2,2,4,8,8,16],
+    '?':[14,17,1,2,4,0,4],'#':[10,31,10,10,31,10,0],'(':[2,4,8,8,8,4,2],
+    ')':[8,4,2,2,2,4,8],"'":[4,4,0,0,0,0,0],',':[0,0,0,0,0,4,8],
+};
+Object.entries(fd).forEach(([ch, rows]) => { FONT[ch] = rows; });
+
+function drawText(text, x, y, scale, color, align, shadow) {
+    text = String(text).toUpperCase();
+    const charW = 6 * scale; // 5px + 1px gap
+    let startX = x;
+    if (align === 'center') startX = x - (text.length * charW) / 2;
+    else if (align === 'right') startX = x - text.length * charW;
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        const rows = FONT[ch];
+        if (!rows) continue;
+        const cx = startX + i * charW;
+        for (let row = 0; row < 7; row++) {
+            for (let col = 0; col < 5; col++) {
+                if (rows[row] & (1 << (4 - col))) {
+                    if (shadow !== false) {
+                        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                        ctx.fillRect(cx + col * scale + scale, y + row * scale + scale, scale, scale);
+                    }
+                    ctx.fillStyle = color;
+                    ctx.fillRect(cx + col * scale, y + row * scale, scale, scale);
+                }
+            }
+        }
+    }
+    return text.length * charW;
+}
+
+function measureText(text, scale) {
+    return String(text).length * 6 * scale;
+}
+
+// =============================================================================
+// AUDIO SYSTEM (Web Audio)
+// =============================================================================
+let audioCtx = null;
+function initAudio() {
+    if (audioCtx) return;
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
+}
+
+function playTone(freq, dur, type, vol, ramp) {
+    if (!audioCtx) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    if (ramp) o.frequency.exponentialRampToValueAtTime(ramp, audioCtx.currentTime + dur);
+    g.gain.setValueAtTime(vol || 0.15, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + dur);
+}
+
+function playNoise(dur, vol) {
+    if (!audioCtx) return;
+    const bufSize = audioCtx.sampleRate * dur;
+    const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(vol || 0.1, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    src.connect(g); g.connect(audioCtx.destination);
+    src.start();
+}
+
+const SFX = {
+    swing() { playTone(300, 0.15, 'sawtooth', 0.08, 100); },
+    hit(power) {
+        playNoise(0.1, 0.2 + power * 0.15);
+        playTone(200 + power * 100, 0.2, 'square', 0.12);
+    },
+    homerun() {
+        playNoise(0.15, 0.35);
+        playTone(400, 0.15, 'square', 0.2);
+        setTimeout(() => playTone(500, 0.15, 'square', 0.18), 100);
+        setTimeout(() => playTone(600, 0.2, 'square', 0.18), 200);
+        setTimeout(() => playTone(800, 0.4, 'square', 0.15), 300);
+    },
+    strike() { playTone(250, 0.2, 'triangle', 0.12, 150); },
+    ball() { playTone(300, 0.15, 'sine', 0.08); },
+    out() { playTone(300, 0.15, 'triangle', 0.1, 100); setTimeout(() => playTone(200, 0.3, 'triangle', 0.1, 80), 150); },
+    walk() { playTone(400, 0.1, 'square', 0.1); setTimeout(() => playTone(500, 0.15, 'square', 0.1), 120); },
+    click() { playTone(800, 0.05, 'square', 0.1); },
+    cheer(dur) {
+        playNoise(dur || 0.5, 0.08);
+        playTone(600, dur || 0.5, 'sine', 0.04);
+    },
+    pitch() { playTone(500, 0.08, 'sine', 0.05, 300); },
+    gameOver() {
+        [400,350,300,250,200].forEach((f,i) => setTimeout(() => playTone(f, 0.2, 'triangle', 0.12), i*150));
+    },
+    win() {
+        [400,500,600,500,600,800].forEach((f,i) => setTimeout(() => playTone(f, 0.15, 'square', 0.12), i*120));
+    },
+};
+
+// =============================================================================
+// PARTICLE SYSTEM
+// =============================================================================
+const MAX_PARTICLES = 300;
+const particles = [];
+for (let i = 0; i < MAX_PARTICLES; i++) {
+    particles.push({ alive: false, x:0, y:0, vx:0, vy:0, life:0, maxLife:0, size:0, color:'#fff', gravity:0, type:'square' });
+}
+
+function spawnParticle(x, y, vx, vy, life, size, color, gravity, type) {
+    for (const p of particles) {
+        if (!p.alive) {
+            p.alive=true; p.x=x; p.y=y; p.vx=vx; p.vy=vy;
+            p.life=life; p.maxLife=life; p.size=size;
+            p.color=color; p.gravity=gravity||300; p.type=type||'square';
+            return p;
+        }
+    }
+}
+
+function spawnBurst(x, y, count, speed, size, colors, gravity, type) {
+    for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd = speed * (0.3 + Math.random() * 0.7);
+        spawnParticle(x, y, Math.cos(angle)*spd, Math.sin(angle)*spd - speed*0.3,
+            0.5 + Math.random()*0.8, size*(0.5+Math.random()*0.5),
+            pick(colors), gravity||400, type);
+    }
+}
+
+function spawnBlockBreak(x, y, count) {
+    const colors = [C.GRASS, C.GRASS2, C.DIRT, C.DIRT_LIGHT, C.GRASS3];
+    spawnBurst(x, y, count||12, 200, 6, colors, 500, 'square');
+}
+
+function spawnHRCelebration(x, y) {
+    const colors = [C.GOLD, C.YELLOW, C.ORANGE, C.RED, C.WHITE, C.CYAN];
+    spawnBurst(x, y, 40, 350, 5, colors, 250);
+    spawnBurst(x, y, 20, 200, 8, [C.GOLD, C.YELLOW], 150);
+}
+
+function spawnConfetti() {
+    for (let i = 0; i < 60; i++) {
+        const colors = [C.RED, C.GREEN, C.GOLD, C.CYAN, C.ORANGE, C.WHITE];
+        spawnParticle(randFloat(100, W-100), -20, randFloat(-30,30), randFloat(60,180),
+            2+Math.random()*2, 4+Math.random()*4, pick(colors), 80, 'square');
+    }
+}
+
+function updateParticles(dt) {
+    for (const p of particles) {
+        if (!p.alive) continue;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += p.gravity * dt;
+        p.life -= dt;
+        if (p.life <= 0) p.alive = false;
+    }
+}
+
+function drawParticles() {
+    for (const p of particles) {
+        if (!p.alive) continue;
+        const alpha = clamp(p.life / p.maxLife, 0, 1);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.color;
+        const s = p.size * (0.5 + alpha * 0.5);
+        ctx.fillRect(p.x - s/2, p.y - s/2, s, s);
+    }
+    ctx.globalAlpha = 1;
+}
+
+// =============================================================================
+// GAME STATE
+// =============================================================================
+let phase = 'title';
+// title, modeSelect, getReady,
+// windup, pitch, swingAnim, hitFlight, resultPause,
+// halfOver, mobBatting, inningChange, gameOver,
+// derbyIntro, derbyWindup, derbyPitch, derbySwing, derbyResult, derbyOver
+
+let mode = ''; // 'full' or 'derby'
+let frameCount = 0;
+let phaseTimer = 0;
+let screenShake = 0;
+let screenShakeX = 0;
+let screenShakeY = 0;
+
+// Scoring
+let playerScore = 0;
+let mobScore = 0;
+let inning = 1;
+let halfInning = 'top'; // top = player bats
+let outs = 0;
+let balls = 0;
+let strikes = 0;
+let runners = [false, false, false]; // 1st, 2nd, 3rd
+
+// Current at-bat
+let currentPitcher = 'zombie';
+let pitchType = 'fastball';
+let pitchReleased = false;
+
+// Ball state
+let ballT = 0; // 0 = pitcher, 1 = plate
+let ballFrames = 50;
+let ballOffsetX = 0; // pitch movement accumulator
+let ballOffsetY = 0;
+let ballActive = false;
+let ballIsStrike = true; // whether the pitch is in the strike zone
+
+// Swing state
+let swinging = false;
+let swingFrame = 0;
+let swingChecked = false;
+let inputBuffered = false;
+
+// Result state
+let lastResult = ''; // 'strike','ball','foul','single','double','triple','homerun','out','strikeout','walk'
+let resultMsg = '';
+let resultColor = C.WHITE;
+let encourageMsg = '';
+let encourageTimer = 0;
+
+// Hit flight animation
+let hitBallX = 0, hitBallY = 0;
+let hitBallVx = 0, hitBallVy = 0;
+let hitBallSize = 0;
+
+// Derby state
+let derbyPitches = 0;
+let derbyMaxPitches = 10;
+let derbyHR = 0;
+let derbyBestHR = 0;
+let derbyDistance = 0;
+
+// Menu
+let selectedButton = 0;
+
+// Mob batting result
+let mobBatResult = '';
+let mobBatRuns = 0;
+
+// Load high score
+try { derbyBestHR = parseInt(localStorage.getItem('mcbb_derbyBest')) || 0; } catch(e) {}
+
+// =============================================================================
+// DRAWING HELPERS
+// =============================================================================
+function drawRect(x, y, w, h, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+}
+
+function drawGradient(x, y, w, h, c1, c2, vertical) {
+    const g = vertical !== false
+        ? ctx.createLinearGradient(x, y, x, y+h)
+        : ctx.createLinearGradient(x, y, x+w, y);
+    g.addColorStop(0, c1);
+    g.addColorStop(1, c2);
+    ctx.fillStyle = g;
+    ctx.fillRect(x, y, w, h);
+}
+
+// =============================================================================
+// SCENE DRAWING: SKY & FIELD
+// =============================================================================
+const HORIZON = 255;
+const PLATE_Y = 520;
+const MOUND_Y = 330;
+const FENCE_Y = 265;
+
+let cloudX = [100, 350, 650, 850];
+
+function drawSky() {
+    drawGradient(0, 0, W, HORIZON, C.SKY_TOP, C.SKY_BOT);
+    // Square sun
+    drawRect(760, 50, 40, 40, C.SUN);
+    drawRect(762, 52, 36, 36, C.SUN_BORDER);
+    drawRect(764, 54, 32, 32, C.SUN);
+
+    // Blocky clouds
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    for (let i = 0; i < cloudX.length; i++) {
+        const cx = ((cloudX[i] + frameCount * 0.15) % (W + 120)) - 60;
+        const cy = 60 + i * 40 + Math.sin(i * 2) * 15;
+        const s = 12 + (i % 2) * 4;
+        // Cloud shape: cluster of rectangles
+        ctx.fillRect(cx, cy, s*4, s);
+        ctx.fillRect(cx+s, cy-s*0.6, s*2, s*0.6);
+        ctx.fillRect(cx+s*0.5, cy+s, s*3, s*0.5);
+    }
+}
+
+function drawField() {
+    // Outfield grass
+    drawGradient(0, HORIZON, W, H - HORIZON, '#4A8030', '#5D9B3C');
+
+    // Grass stripes (mowing pattern)
+    for (let i = 0; i < 12; i++) {
+        const sy = HORIZON + 10 + i * 35;
+        if (i % 2 === 0) {
+            ctx.fillStyle = 'rgba(100,180,60,0.12)';
+            ctx.fillRect(0, sy, W, 35);
+        }
+    }
+
+    // Outfield fence
+    drawRect(0, FENCE_Y - 10, W, 15, C.FENCE_GREEN);
+    drawRect(0, FENCE_Y - 10, W, 3, C.FENCE_DARK);
+    // Fence posts
+    for (let x = 50; x < W; x += 80) {
+        drawRect(x, FENCE_Y - 14, 4, 19, C.FENCE_DARK);
+    }
+
+    // Infield dirt - trapezoidal shape converging toward mound
+    ctx.fillStyle = C.DIRT_LIGHT;
+    ctx.beginPath();
+    ctx.moveTo(W/2 - 180, PLATE_Y + 20);
+    ctx.lineTo(W/2 + 180, PLATE_Y + 20);
+    ctx.lineTo(W/2 + 80, MOUND_Y);
+    ctx.lineTo(W/2 - 80, MOUND_Y);
+    ctx.closePath();
+    ctx.fill();
+
+    // Dirt edge
+    ctx.strokeStyle = C.DIRT;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Pitcher's mound
+    ctx.fillStyle = C.DIRT;
+    ctx.beginPath();
+    ctx.ellipse(W/2, MOUND_Y + 5, 25, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Rubber
+    drawRect(W/2 - 8, MOUND_Y + 2, 16, 3, C.WHITE);
+
+    // Base paths
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 2;
+    // Home to 1st
+    ctx.beginPath(); ctx.moveTo(W/2, PLATE_Y); ctx.lineTo(W/2 + 130, MOUND_Y + 50); ctx.stroke();
+    // Home to 3rd
+    ctx.beginPath(); ctx.moveTo(W/2, PLATE_Y); ctx.lineTo(W/2 - 130, MOUND_Y + 50); ctx.stroke();
+    // 1st to 2nd
+    ctx.beginPath(); ctx.moveTo(W/2 + 130, MOUND_Y + 50); ctx.lineTo(W/2, MOUND_Y - 15); ctx.stroke();
+    // 3rd to 2nd
+    ctx.beginPath(); ctx.moveTo(W/2 - 130, MOUND_Y + 50); ctx.lineTo(W/2, MOUND_Y - 15); ctx.stroke();
+
+    // Bases (white diamonds)
+    drawBase(W/2 + 130, MOUND_Y + 50, 8); // 1st
+    drawBase(W/2, MOUND_Y - 15, 8);       // 2nd
+    drawBase(W/2 - 130, MOUND_Y + 50, 8); // 3rd
+
+    // Home plate
+    ctx.fillStyle = C.WHITE;
+    ctx.beginPath();
+    ctx.moveTo(W/2, PLATE_Y + 8);
+    ctx.lineTo(W/2 + 10, PLATE_Y);
+    ctx.lineTo(W/2 + 8, PLATE_Y - 6);
+    ctx.lineTo(W/2 - 8, PLATE_Y - 6);
+    ctx.lineTo(W/2 - 10, PLATE_Y);
+    ctx.closePath();
+    ctx.fill();
+
+    // Batter's box lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(W/2 - 35, PLATE_Y - 25, 25, 50);
+    ctx.strokeRect(W/2 + 10, PLATE_Y - 25, 25, 50);
+
+    // Runners on base
+    drawRunners();
+}
+
+function drawBase(x, y, size) {
+    ctx.fillStyle = C.WHITE;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(Math.PI/4);
+    ctx.fillRect(-size/2, -size/2, size, size);
+    ctx.restore();
+}
+
+function drawRunners() {
+    const basePositions = [
+        [W/2 + 130, MOUND_Y + 42],
+        [W/2, MOUND_Y - 23],
+        [W/2 - 130, MOUND_Y + 42],
+    ];
+    for (let i = 0; i < 3; i++) {
+        if (runners[i]) {
+            drawMiniSteve(basePositions[i][0], basePositions[i][1], 1.2);
+        }
+    }
+}
+
+function drawMiniSteve(x, y, s) {
+    // Tiny Steve on base
+    drawRect(x-2*s, y-12*s, 4*s, 4*s, C.STEVE_HAIR); // head
+    drawRect(x-2*s, y-8*s, 4*s, 5*s, C.STEVE_SHIRT);  // body
+    drawRect(x-2*s, y-3*s, 2*s, 4*s, C.STEVE_PANTS);   // legs
+    drawRect(x, y-3*s, 2*s, 4*s, C.STEVE_PANTS);
+}
+
+// =============================================================================
+// CHARACTER DRAWING
+// =============================================================================
+
+// Steve batter (back/side view, at plate)
+function drawBatter(swingPct) {
+    const bx = W/2 - 28; // batter position (left batter's box)
+    const by = PLATE_Y + 10;
+    const s = 3; // pixel scale
+
+    // Body - from back/side view
+    // Legs
+    const legSpread = swingPct > 0 ? Math.sin(swingPct * Math.PI) * 3 : 0;
+    drawRect(bx - 5*s - legSpread, by - 12*s, 4*s, 12*s, C.STEVE_PANTS);
+    drawRect(bx - 1*s + legSpread, by - 12*s, 4*s, 12*s, C.STEVE_PANTS2);
+    // Shoes
+    drawRect(bx - 5*s - legSpread, by, 4*s, 2*s, C.STEVE_HAIR);
+    drawRect(bx - 1*s + legSpread, by, 4*s, 2*s, C.STEVE_HAIR);
+
+    // Body
+    const bodyTwist = swingPct > 0 ? Math.sin(swingPct * Math.PI) * 2 : 0;
+    drawRect(bx - 4*s + bodyTwist, by - 24*s, 8*s, 12*s, C.STEVE_SHIRT);
+    drawRect(bx - 4*s + bodyTwist, by - 24*s, 8*s, 2*s, C.STEVE_SHIRT2);
+
+    // Back arm (further from viewer)
+    const armAngle = swingPct > 0 ? lerp(-0.5, 2.5, easeOutCubic(clamp(swingPct * 1.2, 0, 1))) : -0.3;
+    drawArm(bx + 4*s + bodyTwist, by - 22*s, armAngle, s, C.STEVE_SKIN);
+
+    // Bat
+    drawBat(bx + 4*s + bodyTwist, by - 22*s, armAngle, s, swingPct);
+
+    // Front arm
+    drawArm(bx - 4*s + bodyTwist, by - 22*s, armAngle - 0.1, s, C.STEVE_SKIN);
+
+    // Head
+    drawRect(bx - 4*s + bodyTwist, by - 32*s, 8*s, 8*s, C.STEVE_HAIR);
+    // Ear/skin visible from side
+    drawRect(bx - 5*s + bodyTwist, by - 30*s, 1*s, 4*s, C.STEVE_SKIN);
+    // Helmet line
+    drawRect(bx - 4*s + bodyTwist, by - 32*s, 8*s, 1*s, '#2A1B0D');
+}
+
+function drawArm(x, y, angle, s, color) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, 3*s, 10*s);
+    ctx.restore();
+}
+
+function drawBat(x, y, angle, s, swingPct) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    // Handle
+    ctx.fillStyle = C.BAT_DARK;
+    ctx.fillRect(2*s, 8*s, 2*s, 14*s);
+    // Barrel
+    ctx.fillStyle = C.BAT_LIGHT;
+    ctx.fillRect(1*s, 18*s, 4*s, 12*s);
+    ctx.fillStyle = C.BAT_DARK;
+    ctx.fillRect(1*s, 28*s, 4*s, 2*s);
+    // Knob
+    ctx.fillStyle = C.BAT_DARK;
+    ctx.fillRect(1.5*s, 6*s, 3*s, 3*s);
+    ctx.restore();
+}
+
+// Pitcher drawing
+function drawPitcherMob(type, windupPct) {
+    const px = W/2;
+    const py = MOUND_Y;
+    const s = 2; // smaller scale (at distance)
+
+    switch(type) {
+        case 'zombie': drawZombiePitcher(px, py, s, windupPct); break;
+        case 'skeleton': drawSkeletonPitcher(px, py, s, windupPct); break;
+        case 'creeper': drawCreeperPitcher(px, py, s, windupPct); break;
+        case 'enderman': drawEndermanPitcher(px, py, s, windupPct); break;
+    }
+}
+
+function drawZombiePitcher(x, y, s, wp) {
+    const armRaise = wp > 0 ? Math.sin(wp * Math.PI) * 20 : 0;
+    // Legs
+    drawRect(x-3*s, y-12*s, 3*s, 12*s, C.STEVE_PANTS);
+    drawRect(x, y-12*s, 3*s, 12*s, C.STEVE_PANTS2);
+    // Body
+    drawRect(x-4*s, y-24*s, 8*s, 12*s, C.STEVE_SHIRT);
+    // Arms (zombie arms forward)
+    drawRect(x-7*s, y-24*s-armRaise, 3*s, 10*s, C.ZOMBIE_SKIN);
+    drawRect(x+4*s, y-24*s-armRaise, 3*s, 10*s, C.ZOMBIE_SKIN);
+    // Head
+    drawRect(x-4*s, y-32*s, 8*s, 8*s, C.ZOMBIE_SKIN);
+    // Face
+    drawRect(x-3*s, y-30*s, 2*s, 2*s, C.ZOMBIE_DARK); // eyes
+    drawRect(x+1*s, y-30*s, 2*s, 2*s, C.ZOMBIE_DARK);
+    drawRect(x-2*s, y-27*s, 4*s, 1*s, C.ZOMBIE_DARK); // mouth
+    // Ball in hand
+    if (wp > 0 && wp < 0.8) {
+        ctx.fillStyle = C.BALL_WHITE;
+        ctx.beginPath();
+        ctx.arc(x+5*s, y-26*s-armRaise, 3, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+function drawSkeletonPitcher(x, y, s, wp) {
+    const armRaise = wp > 0 ? Math.sin(wp * Math.PI) * 22 : 0;
+    // Legs (thin)
+    drawRect(x-2*s, y-12*s, 2*s, 12*s, C.SKEL_BONE);
+    drawRect(x, y-12*s, 2*s, 12*s, C.SKEL_BONE);
+    // Body (ribcage)
+    drawRect(x-3*s, y-24*s, 6*s, 12*s, C.SKEL_DARK);
+    drawRect(x-3*s, y-24*s, 6*s, 2*s, C.SKEL_BONE);
+    drawRect(x-3*s, y-20*s, 6*s, 2*s, C.SKEL_BONE);
+    drawRect(x-3*s, y-16*s, 6*s, 2*s, C.SKEL_BONE);
+    // Arms
+    drawRect(x-6*s, y-24*s-armRaise, 2*s, 10*s, C.SKEL_BONE);
+    drawRect(x+4*s, y-24*s-armRaise, 2*s, 10*s, C.SKEL_BONE);
+    // Head (skull)
+    drawRect(x-4*s, y-33*s, 8*s, 9*s, C.SKEL_BONE);
+    drawRect(x-3*s, y-31*s, 2*s, 3*s, C.SKEL_DARK); // eye sockets
+    drawRect(x+1*s, y-31*s, 2*s, 3*s, C.SKEL_DARK);
+    drawRect(x-1*s, y-27*s, 2*s, 1*s, C.SKEL_DARK); // nose
+    drawRect(x-2*s, y-25*s, 4*s, 1*s, C.SKEL_DARK); // mouth
+    // Ball
+    if (wp > 0 && wp < 0.8) {
+        ctx.fillStyle = C.BALL_WHITE;
+        ctx.beginPath();
+        ctx.arc(x+5*s, y-26*s-armRaise, 3, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+function drawCreeperPitcher(x, y, s, wp) {
+    const bounce = wp > 0 ? Math.sin(wp * Math.PI * 2) * 3 : 0;
+    const offy = -bounce;
+    // 4 Legs
+    drawRect(x-4*s, y-8*s+offy, 2*s, 8*s, C.CREEP_GREEN);
+    drawRect(x-1*s, y-8*s+offy, 2*s, 8*s, C.CREEP_GREEN);
+    drawRect(x+2*s, y-8*s+offy, 2*s, 8*s, C.CREEP_DARK);
+    // No arms! Creepers have no arms
+    // Body
+    drawRect(x-4*s, y-20*s+offy, 8*s, 12*s, C.CREEP_GREEN);
+    drawRect(x-4*s, y-20*s+offy, 8*s, 3*s, C.CREEP_DARK);
+    // Head
+    drawRect(x-5*s, y-30*s+offy, 10*s, 10*s, C.CREEP_GREEN);
+    // Iconic creeper face
+    drawRect(x-4*s, y-29*s+offy, 2*s, 3*s, C.CREEP_BLACK); // left eye
+    drawRect(x+2*s, y-29*s+offy, 2*s, 3*s, C.CREEP_BLACK); // right eye
+    drawRect(x-1*s, y-26*s+offy, 2*s, 2*s, C.CREEP_BLACK); // nose
+    drawRect(x-3*s, y-24*s+offy, 2*s, 2*s, C.CREEP_BLACK); // mouth left
+    drawRect(x-1*s, y-24*s+offy, 2*s, 4*s, C.CREEP_BLACK); // mouth center
+    drawRect(x+1*s, y-24*s+offy, 2*s, 2*s, C.CREEP_BLACK); // mouth right
+    // Ball (floating since no arms - it's funny)
+    if (wp > 0 && wp < 0.8) {
+        ctx.fillStyle = C.BALL_WHITE;
+        ctx.beginPath();
+        ctx.arc(x, y-33*s+offy + Math.sin(frameCount*0.2)*3, 3, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+function drawEndermanPitcher(x, y, s, wp) {
+    const armRaise = wp > 0 ? Math.sin(wp * Math.PI) * 25 : 0;
+    const flicker = (wp > 0.3 && wp < 0.5) ? (frameCount % 3 === 0 ? randInt(-6,6) : 0) : 0;
+    const ex = x + flicker;
+    // Legs (very long)
+    drawRect(ex-2*s, y-16*s, 2*s, 16*s, C.ENDER_BLACK);
+    drawRect(ex, y-16*s, 2*s, 16*s, C.ENDER_BLACK);
+    // Body (tall and thin)
+    drawRect(ex-3*s, y-30*s, 6*s, 14*s, C.ENDER_BLACK);
+    // Arms (very long)
+    drawRect(ex-6*s, y-28*s-armRaise, 2*s, 14*s, C.ENDER_BLACK);
+    drawRect(ex+4*s, y-28*s-armRaise, 2*s, 14*s, C.ENDER_BLACK);
+    // Head
+    drawRect(ex-4*s, y-38*s, 8*s, 8*s, C.ENDER_BLACK);
+    // Eyes (purple/magenta)
+    drawRect(ex-3*s, y-35*s, 2*s, 1*s, C.ENDER_PURPLE);
+    drawRect(ex+1*s, y-35*s, 2*s, 1*s, C.ENDER_PURPLE);
+    // Ender particles
+    if (Math.random() < 0.3) {
+        spawnParticle(ex + randFloat(-15,15), y + randFloat(-40, -5),
+            randFloat(-15,15), randFloat(-30,-60), 0.5, 2, C.ENDER_PURPLE, -50, 'square');
+    }
+    // Ball
+    if (wp > 0 && wp < 0.8) {
+        ctx.fillStyle = C.BALL_WHITE;
+        ctx.beginPath();
+        ctx.arc(ex+5*s, y-30*s-armRaise, 3, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+// =============================================================================
+// BALL DRAWING
+// =============================================================================
+function getBallScreenPos(t) {
+    // t: 0 = at pitcher, 1 = at plate
+    // Perspective: ball gets bigger and moves toward bottom of screen
+    const perspective = 1 / (0.12 + (1 - t) * 0.88);
+    const baseX = W/2;
+    const baseY = lerp(MOUND_Y - 10, PLATE_Y - 20, easeInQuad(t));
+    const ox = ballOffsetX * perspective * 40;
+    const oy = ballOffsetY * perspective * 30;
+    const size = lerp(3, 20, t * t);
+    return { x: baseX + ox, y: baseY + oy, size: size };
+}
+
+function drawBall() {
+    if (!ballActive) return;
+    const pos = getBallScreenPos(ballT);
+    const r = pos.size;
+
+    // Shadow on ground
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.beginPath();
+    ctx.ellipse(pos.x, PLATE_Y + 5, r * 0.8, r * 0.25, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // Ball
+    ctx.fillStyle = C.BALL_WHITE;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, r, 0, Math.PI*2);
+    ctx.fill();
+
+    // Stitching (red arcs)
+    if (r > 5) {
+        ctx.strokeStyle = C.BALL_RED;
+        ctx.lineWidth = Math.max(1, r * 0.12);
+        ctx.beginPath();
+        ctx.arc(pos.x - r*0.3, pos.y, r*0.5, -0.8, 0.8);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(pos.x + r*0.3, pos.y, r*0.5, Math.PI-0.8, Math.PI+0.8);
+        ctx.stroke();
+    }
+
+    // Ender pearl effect
+    if (pitchType === 'enderpearl' && ballT > 0.3 && ballT < 0.7) {
+        if (frameCount % 5 === 0) {
+            spawnParticle(pos.x, pos.y, randFloat(-20,20), randFloat(-20,20),
+                0.3, 2, C.ENDER_PURPLE, 0);
+        }
+    }
+}
+
+function drawHitBall() {
+    if (phase !== 'hitFlight' && phase !== 'derbyResult') return;
+    const r = hitBallSize;
+    if (r < 1) return;
+    ctx.fillStyle = C.BALL_WHITE;
+    ctx.beginPath();
+    ctx.arc(hitBallX, hitBallY, r, 0, Math.PI*2);
+    ctx.fill();
+}
+
+// =============================================================================
+// HUD DRAWING
+// =============================================================================
+function drawHUD() {
+    if (phase === 'title' || phase === 'modeSelect') return;
+
+    // Scoreboard background
+    drawRect(0, 0, W, 42, 'rgba(30,30,30,0.85)');
+    drawRect(0, 42, W, 2, 'rgba(80,80,80,0.5)');
+
+    if (mode === 'full') {
+        // Inning
+        drawText('INN ' + inning, 20, 8, 3, C.WHITE, 'left');
+        drawText(halfInning === 'top' ? 'TOP' : 'BOT', 20, 28, 2, C.GRAY, 'left');
+
+        // Score
+        drawText('STEVE', W/2 - 110, 6, 2.5, C.CYAN, 'left');
+        drawText(String(playerScore), W/2 - 20, 4, 3.5, C.WHITE, 'left');
+        drawText('-', W/2 + 10, 6, 3, C.GRAY, 'left');
+        drawText(String(mobScore), W/2 + 30, 4, 3.5, C.WHITE, 'left');
+        drawText('MOBS', W/2 + 65, 6, 2.5, C.RED, 'left');
+
+        // Outs
+        const outX = W - 180;
+        drawText('OUT', outX, 6, 2, C.GRAY, 'left');
+        for (let i = 0; i < 3; i++) {
+            ctx.beginPath();
+            ctx.arc(outX + 40 + i * 20, 14, 6, 0, Math.PI * 2);
+            ctx.fillStyle = i < outs ? C.RED : 'rgba(255,255,255,0.2)';
+            ctx.fill();
+        }
+
+        // Count
+        drawText('B:' + balls + ' S:' + strikes, outX, 28, 2, C.GRAY, 'left');
+
+        // Pitcher name
+        drawText(currentPitcher.toUpperCase(), W - 80, 28, 2, C.ORANGE, 'right');
+    } else {
+        // Derby mode HUD
+        drawText('HOME RUN DERBY', W/2, 4, 3, C.GOLD, 'center');
+        const pitchDisplay = (phase === 'derbyResult' || phase === 'derbyOver') ? derbyPitches : derbyPitches + 1;
+        drawText('PITCH ' + Math.min(pitchDisplay, derbyMaxPitches) + '/' + derbyMaxPitches, 20, 8, 2.5, C.WHITE, 'left');
+        drawText('HR: ' + derbyHR, W - 20, 8, 3, C.YELLOW, 'right');
+        if (derbyBestHR > 0) {
+            drawText('BEST: ' + derbyBestHR, W - 20, 28, 2, C.GRAY, 'right');
+        }
+    }
+}
+
+// =============================================================================
+// RESULT & MESSAGE DRAWING
+// =============================================================================
+function drawResultMessage() {
+    if (!resultMsg || phaseTimer < 0) return;
+    const alpha = clamp(phaseTimer / 10, 0, 1);
+    ctx.globalAlpha = alpha;
+
+    const scale = resultMsg.includes('HOME RUN') ? 6 : (resultMsg.includes('TRIPLE') || resultMsg.includes('DOUBLE') ? 5 : 4);
+    const yOff = resultMsg.includes('HOME RUN') ? -30 : 0;
+
+    // Pulsing effect for big hits
+    const pulse = resultMsg.includes('HOME RUN') ? 1 + Math.sin(frameCount * 0.3) * 0.05 : 1;
+    const effectiveScale = scale * pulse;
+
+    drawText(resultMsg, W/2, H/2 - 60 + yOff, effectiveScale, resultColor, 'center');
+
+    // Encourage message below
+    if (encourageMsg && encourageTimer > 0) {
+        const ea = clamp(encourageTimer / 20, 0, 1);
+        ctx.globalAlpha = ea * alpha;
+        drawText(encourageMsg, W/2, H/2 - 10 + yOff, 3, C.GOLD, 'center');
+    }
+
+    ctx.globalAlpha = 1;
+}
+
+// Pitch type announcement
+let pitchAnnounce = '';
+let pitchAnnounceTimer = 0;
+function drawPitchAnnounce() {
+    if (pitchAnnounceTimer <= 0) return;
+    const a = clamp(pitchAnnounceTimer / 15, 0, 1);
+    ctx.globalAlpha = a * 0.7;
+    drawText(pitchAnnounce, W/2, MOUND_Y - 70, 2, C.YELLOW, 'center');
+    ctx.globalAlpha = 1;
+}
+
+// =============================================================================
+// TITLE SCREEN
+// =============================================================================
+function drawTitle() {
+    // Background field
+    drawSky();
+    drawField();
+
+    // Darken overlay
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Title
+    const bounce = Math.sin(frameCount * 0.04) * 5;
+    drawText('MINECRAFT', W/2, 100 + bounce, 8, C.GREEN, 'center');
+    drawText('BASEBALL', W/2, 170 + bounce, 8, C.GOLD, 'center');
+
+    // Decorative characters
+    // Steve on left
+    const steveX = W/2 - 200;
+    const steveY = 380;
+    drawRect(steveX-12, steveY-48, 24, 24, C.STEVE_HAIR);
+    drawRect(steveX-12, steveY-50, 24, 6, '#2A1B0D');
+    drawRect(steveX-14, steveY-42, 4, 12, C.STEVE_SKIN);
+    drawRect(steveX-12, steveY-24, 24, 30, C.STEVE_SHIRT);
+    drawRect(steveX-12, steveY+6, 10, 30, C.STEVE_PANTS);
+    drawRect(steveX+2, steveY+6, 10, 30, C.STEVE_PANTS2);
+    // Bat
+    drawRect(steveX+24, steveY-50, 6, 40, C.BAT_LIGHT);
+    drawRect(steveX+24, steveY-52, 6, 6, C.BAT_DARK);
+
+    // Creeper on right
+    const creeperX = W/2 + 200;
+    const creeperY = 390;
+    drawRect(creeperX-15, creeperY-50, 30, 30, C.CREEP_GREEN);
+    drawRect(creeperX-12, creeperY-47, 6, 9, C.CREEP_BLACK);
+    drawRect(creeperX+6, creeperY-47, 6, 9, C.CREEP_BLACK);
+    drawRect(creeperX-3, creeperY-38, 6, 6, C.CREEP_BLACK);
+    drawRect(creeperX-9, creeperY-32, 6, 6, C.CREEP_BLACK);
+    drawRect(creeperX-3, creeperY-32, 6, 12, C.CREEP_BLACK);
+    drawRect(creeperX+3, creeperY-32, 6, 6, C.CREEP_BLACK);
+    drawRect(creeperX-15, creeperY-20, 30, 30, C.CREEP_GREEN);
+    drawRect(creeperX-15, creeperY+10, 10, 20, C.CREEP_GREEN);
+    drawRect(creeperX+5, creeperY+10, 10, 20, C.CREEP_GREEN);
+
+    // Baseball in center
+    ctx.fillStyle = C.BALL_WHITE;
+    ctx.beginPath(); ctx.arc(W/2, 340, 25, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = C.BALL_RED; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(W/2-8, 340, 15, -1, 1); ctx.stroke();
+    ctx.beginPath(); ctx.arc(W/2+8, 340, 15, Math.PI-1, Math.PI+1); ctx.stroke();
+
+    // Start prompt
+    const blink = Math.sin(frameCount * 0.08) > 0;
+    if (blink) {
+        drawText('PRESS SPACE OR TAP TO START', W/2, 500, 3, C.WHITE, 'center');
+    }
+
+    drawText('A BLOCKY BASEBALL ADVENTURE', W/2, 560, 2, C.GRAY, 'center');
+}
+
+// =============================================================================
+// MODE SELECT SCREEN
+// =============================================================================
+function drawModeSelect() {
+    drawSky();
+    drawField();
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, W, H);
+
+    drawText('CHOOSE YOUR MODE', W/2, 80, 5, C.WHITE, 'center');
+
+    // Button 1: Home Run Derby
+    drawButton(W/2, 240, 'HOME RUN DERBY', '10 PITCHES - SMASH DINGERS!', selectedButton === 0, C.GOLD);
+    // Button 2: 3-Inning Game
+    drawButton(W/2, 400, '3 INNING GAME', 'FULL BASEBALL ACTION!', selectedButton === 1, C.CYAN);
+
+    const blink = Math.sin(frameCount * 0.08) > 0;
+    if (blink) drawText('UP/DOWN TO SELECT  -  SPACE TO PLAY', W/2, 540, 2.5, C.GRAY, 'center');
+}
+
+function drawButton(x, y, title, subtitle, selected, color) {
+    const w = 420, h = 100;
+    // Stone texture background
+    drawRect(x-w/2, y-h/2, w, h, selected ? C.STONE : C.STONE_DARK);
+    drawRect(x-w/2+2, y-h/2+2, w-4, h-4, selected ? '#8A8A8A' : '#505050');
+    // Highlight border
+    if (selected) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x-w/2-1, y-h/2-1, w+2, h+2);
+        // Selection arrow
+        drawText('>', x-w/2+15, y-18, 4, color, 'left');
+    }
+    drawText(title, x+10, y-22, 4, selected ? color : C.GRAY, 'center');
+    drawText(subtitle, x+10, y+22, 2, selected ? C.WHITE : C.GRAY, 'center');
+}
+
+// =============================================================================
+// GAME OVER / DERBY OVER
+// =============================================================================
+function drawGameOver() {
+    drawSky();
+    drawField();
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, W, H);
+
+    if (mode === 'full') {
+        const won = playerScore > mobScore;
+        const tied = playerScore === mobScore;
+        drawText('GAME OVER', W/2, 80, 7, C.WHITE, 'center');
+        drawText('STEVE  ' + playerScore + '  -  ' + mobScore + '  MOBS', W/2, 180, 5, C.WHITE, 'center');
+        if (tied) {
+            drawText('TIE GAME!', W/2, 280, 6, C.YELLOW, 'center');
+        } else {
+            drawText(won ? 'YOU WIN!' : 'MOBS WIN!', W/2, 280, 6, won ? C.GREEN : C.RED, 'center');
+        }
+        if (won && frameCount % 30 < 15) spawnConfetti();
+    } else {
+        drawText('DERBY OVER!', W/2, 80, 7, C.GOLD, 'center');
+        drawText('HOME RUNS: ' + derbyHR, W/2, 200, 6, C.YELLOW, 'center');
+        if (derbyHR >= derbyBestHR && derbyHR > 0) {
+            drawText('NEW BEST!', W/2, 280, 5, C.GREEN, 'center');
+        } else if (derbyBestHR > 0) {
+            drawText('BEST: ' + derbyBestHR, W/2, 280, 4, C.GRAY, 'center');
+        }
+        if (derbyHR > 0 && frameCount % 25 < 12) spawnConfetti();
+    }
+
+    const blink = Math.sin(frameCount * 0.08) > 0;
+    if (blink) drawText('PRESS SPACE TO PLAY AGAIN', W/2, 450, 3, C.WHITE, 'center');
+}
+
+function drawMobBatting() {
+    drawSky();
+    drawField();
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(0, 0, W, H);
+
+    drawText('MOBS ARE BATTING...', W/2, 200, 5, C.ORANGE, 'center');
+
+    // Animated dots
+    const dots = '.'.repeat((Math.floor(frameCount / 15) % 4));
+    drawText(dots, W/2 + 160, 200, 5, C.ORANGE, 'left', false);
+
+    // Show little mob faces
+    for (let i = 0; i < 3; i++) {
+        const mx = W/2 - 80 + i * 80;
+        const bobY = Math.sin(frameCount * 0.1 + i) * 5;
+        const mob = PITCHERS[i % PITCHERS.length];
+        drawMobFace(mx, 320 + bobY, mob);
+    }
+
+    if (mobBatResult) {
+        drawText(mobBatResult, W/2, 420, 4, C.RED, 'center');
+    }
+}
+
+function drawMobFace(x, y, type) {
+    const s = 3;
+    switch(type) {
+        case 'zombie':
+            drawRect(x-4*s, y-4*s, 8*s, 8*s, C.ZOMBIE_SKIN);
+            drawRect(x-3*s, y-2*s, 2*s, 2*s, C.ZOMBIE_DARK);
+            drawRect(x+1*s, y-2*s, 2*s, 2*s, C.ZOMBIE_DARK);
+            drawRect(x-2*s, y+1*s, 4*s, 1*s, C.ZOMBIE_DARK);
+            break;
+        case 'skeleton':
+            drawRect(x-4*s, y-4*s, 8*s, 8*s, C.SKEL_BONE);
+            drawRect(x-3*s, y-2*s, 2*s, 2*s, C.SKEL_DARK);
+            drawRect(x+1*s, y-2*s, 2*s, 2*s, C.SKEL_DARK);
+            drawRect(x-1*s, y+1*s, 2*s, 1*s, C.SKEL_DARK);
+            break;
+        case 'creeper':
+            drawRect(x-4*s, y-4*s, 8*s, 8*s, C.CREEP_GREEN);
+            drawRect(x-3*s, y-3*s, 2*s, 2*s, C.CREEP_BLACK);
+            drawRect(x+1*s, y-3*s, 2*s, 2*s, C.CREEP_BLACK);
+            drawRect(x-1*s, y-1*s, 2*s, 2*s, C.CREEP_BLACK);
+            drawRect(x-2*s, y+1*s, 4*s, 2*s, C.CREEP_BLACK);
+            break;
+        case 'enderman':
+            drawRect(x-4*s, y-4*s, 8*s, 8*s, C.ENDER_BLACK);
+            drawRect(x-3*s, y-1*s, 2*s, 1*s, C.ENDER_PURPLE);
+            drawRect(x+1*s, y-1*s, 2*s, 1*s, C.ENDER_PURPLE);
+            break;
+    }
+}
+
+function drawInningChange() {
+    drawSky();
+    drawField();
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, W, H);
+    drawText('INNING ' + inning, W/2, 220, 7, C.WHITE, 'center');
+    drawText(halfInning === 'top' ? 'YOUR TURN TO BAT!' : 'TAKE THE FIELD!', W/2, 320, 4, C.YELLOW, 'center');
+    drawText('STEVE ' + playerScore + ' - ' + mobScore + ' MOBS', W/2, 400, 3, C.GRAY, 'center');
+}
+
+function drawGetReady() {
+    drawSky();
+    drawField();
+    const s = 6 + Math.sin(frameCount * 0.1) * 0.5;
+    drawText('PLAY BALL!', W/2, H/2 - 40, s, C.YELLOW, 'center');
+}
+
+// =============================================================================
+// GAME LOGIC
+// =============================================================================
+function startNewGame(gameMode) {
+    mode = gameMode;
+    playerScore = 0;
+    mobScore = 0;
+    inning = 1;
+    halfInning = 'top';
+    outs = 0;
+    balls = 0;
+    strikes = 0;
+    runners = [false, false, false];
+    currentPitcher = PITCHERS[0];
+    resetAtBat();
+
+    if (mode === 'full') {
+        setPhase('getReady', 80);
+    } else {
+        derbyPitches = 0;
+        derbyHR = 0;
+        setPhase('derbyIntro', 80);
+    }
+}
+
+function setPhase(p, timer) {
+    phase = p;
+    phaseTimer = timer || 0;
+}
+
+function resetAtBat() {
+    balls = 0;
+    strikes = 0;
+    ballActive = false;
+    swinging = false;
+    swingFrame = 0;
+    swingChecked = false;
+    inputBuffered = false;
+}
+
+function startPitch() {
+    // Rotate pitcher in derby mode for variety
+    if (mode === 'derby') {
+        currentPitcher = PITCHERS[derbyPitches % PITCHERS.length];
+    }
+    // Choose pitch type
+    pitchType = pick(PITCH_TYPES[currentPitcher]);
+    ballFrames = PITCH_FRAMES[pitchType];
+    ballT = 0;
+    ballOffsetX = 0;
+    ballOffsetY = 0;
+    ballActive = true;
+    ballIsStrike = mode === 'derby' ? true : Math.random() < 0.72; // derby: always strikes
+    pitchReleased = false;
+    swinging = false;
+    swingFrame = 0;
+    swingChecked = false;
+    inputBuffered = false;
+    resultMsg = '';
+    encourageMsg = '';
+    encourageTimer = 0;
+
+    // Pitch announcement
+    const names = { fastball: 'FASTBALL!', curveball: 'CURVEBALL!', changeup: 'CHANGEUP!', enderpearl: 'ENDER PEARL!' };
+    pitchAnnounce = names[pitchType] || '';
+    pitchAnnounceTimer = 40;
+
+    setPhase(mode === 'derby' ? 'derbyPitch' : 'pitch', 0);
+    SFX.pitch();
+}
+
+function startWindup() {
+    setPhase(mode === 'derby' ? 'derbyWindup' : 'windup', 40);
+    ballActive = false;
+}
+
+function doSwing() {
+    if (swinging) return;
+    initAudio();
+    swinging = true;
+    swingFrame = 0;
+    swingChecked = false;
+    SFX.swing();
+}
+
+function updateBall() {
+    if (!ballActive) return;
+    ballT += 1 / ballFrames;
+
+    // Apply pitch movement
+    const move = PITCH_MOVE[pitchType];
+    if (pitchType === 'curveball') {
+        ballOffsetX += move.dx * (ballT * ballT);
+        ballOffsetY += move.dy * (ballT * ballT);
+    } else if (pitchType === 'changeup') {
+        ballOffsetY += move.dy;
+    } else if (pitchType === 'enderpearl') {
+        // Jitter effect
+        if (ballT > 0.3 && ballT < 0.7 && frameCount % 8 === 0) {
+            ballOffsetX += randFloat(-0.3, 0.3);
+            ballOffsetY += randFloat(-0.2, 0.2);
+        }
+    }
+
+    // Ball not in strike zone: drift outside
+    if (!ballIsStrike) {
+        const drift = Math.random() < 0.5 ? 1 : -1;
+        ballOffsetX += drift * 0.025;
+        ballOffsetY += (Math.random() < 0.5 ? 1 : -1) * 0.02;
+    }
+}
+
+function checkSwingContact() {
+    if (swingChecked) return;
+    swingChecked = true;
+
+    const timing = Math.abs(ballT - 1.0);
+
+    if (timing > CONTACT_WINDOW) {
+        // Complete miss
+        handleMiss();
+        return;
+    }
+
+    // We have contact!
+    let quality;
+    if (timing <= PERFECT_T) quality = 'perfect';
+    else if (timing <= GOOD_T) quality = 'good';
+    else if (timing <= OK_T) quality = 'ok';
+    else quality = 'weak';
+
+    const outcome = weightedPick(HIT_TABLE[quality]);
+    handleHit(outcome, quality);
+}
+
+function handleMiss() {
+    ballActive = false;
+    strikes++;
+    resultMsg = pick(STRIKE_MSGS);
+    resultColor = C.RED;
+    SFX.strike();
+
+    if (strikes >= 3) {
+        resultMsg = 'STRIKEOUT!';
+        outs++;
+        SFX.out();
+        resetAtBat();
+        setPhase('resultPause', 80);
+    } else {
+        setPhase('resultPause', 50);
+    }
+}
+
+function handleHit(outcome, quality) {
+    ballActive = false;
+
+    switch(outcome) {
+        case 'foul':
+            resultMsg = 'FOUL BALL!';
+            resultColor = C.ORANGE;
+            if (strikes < 2) strikes++;
+            SFX.hit(0.3);
+            spawnBlockBreak(getBallScreenPos(1).x, getBallScreenPos(1).y, 6);
+            setPhase('resultPause', 50);
+            return;
+
+        case 'out':
+            resultMsg = Math.random() < 0.5 ? 'FLY OUT!' : 'GROUND OUT!';
+            resultColor = C.RED;
+            outs++;
+            SFX.out();
+            launchHitBall(0.5, Math.random() < 0.5 ? -1 : 1);
+            resetAtBat();
+            setPhase('hitFlight', 70);
+            return;
+
+        case 'single':
+            resultMsg = 'SINGLE!';
+            resultColor = C.GREEN;
+            encourageMsg = pick(ENCOURAGE);
+            encourageTimer = 60;
+            SFX.hit(1);
+            SFX.cheer(0.3);
+            advanceRunners(1);
+            spawnBlockBreak(getBallScreenPos(1).x, getBallScreenPos(1).y, 10);
+            launchHitBall(0.6, (Math.random()-0.5)*2);
+            setPhase('hitFlight', 80);
+            break;
+
+        case 'double':
+            resultMsg = 'DOUBLE!';
+            resultColor = C.CYAN;
+            encourageMsg = pick(ENCOURAGE);
+            encourageTimer = 60;
+            SFX.hit(2);
+            SFX.cheer(0.5);
+            advanceRunners(2);
+            spawnBlockBreak(getBallScreenPos(1).x, getBallScreenPos(1).y, 15);
+            launchHitBall(0.75, (Math.random()-0.5)*1.5);
+            setPhase('hitFlight', 80);
+            break;
+
+        case 'triple':
+            resultMsg = 'TRIPLE!';
+            resultColor = C.YELLOW;
+            encourageMsg = pick(ENCOURAGE);
+            encourageTimer = 60;
+            SFX.hit(3);
+            SFX.cheer(0.7);
+            advanceRunners(3);
+            spawnBlockBreak(getBallScreenPos(1).x, getBallScreenPos(1).y, 18);
+            launchHitBall(0.85, (Math.random()-0.5));
+            screenShake = 5;
+            setPhase('hitFlight', 90);
+            break;
+
+        case 'homerun':
+            resultMsg = 'HOME RUN!';
+            resultColor = C.GOLD;
+            encourageMsg = pick(HR_MSGS);
+            encourageTimer = 80;
+            SFX.homerun();
+            SFX.cheer(1.5);
+            scoreHomeRun();
+            spawnBlockBreak(getBallScreenPos(1).x, getBallScreenPos(1).y, 25);
+            setTimeout(() => spawnHRCelebration(W/2, H/2), 300);
+            launchHitBall(1.0, (Math.random()-0.5)*0.5);
+            screenShake = 12;
+            setPhase('hitFlight', 110);
+            break;
+    }
+
+    resetAtBat();
+}
+
+function launchHitBall(power, direction) {
+    const pos = getBallScreenPos(clamp(ballT, 0, 1));
+    hitBallX = pos.x;
+    hitBallY = pos.y;
+    hitBallVx = direction * 200 * power;
+    hitBallVy = -400 * power;
+    hitBallSize = 15;
+}
+
+function scoreHomeRun() {
+    // Score all runners + batter
+    const runsScored = 1 + runners.filter(r => r).length;
+    playerScore += runsScored;
+    runners = [false, false, false];
+}
+
+function advanceRunners(bases) {
+    // Advance all runners by 'bases' positions. Score any that go past 3rd.
+    let newRunners = [false, false, false];
+    let scored = 0;
+    for (let i = 2; i >= 0; i--) {
+        if (runners[i]) {
+            const newPos = i + bases;
+            if (newPos >= 3) scored++;
+            else newRunners[newPos] = true;
+        }
+    }
+    // Batter goes to base
+    if (bases - 1 < 3) newRunners[bases - 1] = true;
+    // But batter scored on HR (handled separately)
+    if (bases >= 4) scored++;
+
+    playerScore += scored;
+    runners = newRunners;
+}
+
+function handleBallPassedPlate() {
+    // Player didn't swing
+    ballActive = false;
+    if (ballIsStrike) {
+        strikes++;
+        resultMsg = 'STRIKE!';
+        resultColor = C.RED;
+        SFX.strike();
+        if (strikes >= 3) {
+            resultMsg = 'STRIKEOUT!';
+            outs++;
+            SFX.out();
+            setPhase('resultPause', 80);
+            resetAtBat();
+            return;
+        }
+    } else {
+        balls++;
+        resultMsg = 'BALL ' + balls;
+        resultColor = C.GREEN;
+        SFX.ball();
+        if (balls >= 4) {
+            resultMsg = 'WALK!';
+            resultColor = C.GREEN;
+            SFX.walk();
+            // Advance runners
+            if (runners[2] && runners[1] && runners[0]) { playerScore++; }
+            if (runners[1] && runners[0]) { runners[2] = true; }
+            if (runners[0]) { runners[1] = true; }
+            runners[0] = true;
+            setPhase('resultPause', 70);
+            resetAtBat();
+            return;
+        }
+    }
+    setPhase('resultPause', 45);
+}
+
+function checkInningProgress() {
+    if (outs >= 3) {
+        outs = 0;
+        if (halfInning === 'top') {
+            // Switch to mob batting
+            halfInning = 'bottom';
+            mobBatResult = '';
+            mobBatRuns = 0;
+            setPhase('halfOver', 50);
+        } else {
+            // End of full inning
+            halfInning = 'top';
+            inning++;
+            if (inning > 3 && playerScore !== mobScore) {
+                setPhase('gameOver', 0);
+                if (playerScore > mobScore) { SFX.win(); spawnConfetti(); }
+                else SFX.gameOver();
+                return;
+            }
+            currentPitcher = PITCHERS[(inning - 1) % PITCHERS.length];
+            setPhase('inningChange', 90);
+        }
+        runners = [false, false, false];
+        resetAtBat();
+    }
+}
+
+function simulateMobBatting() {
+    // Quick random simulation
+    const runs = Math.random() < 0.35 ? 0 : (Math.random() < 0.5 ? 1 : (Math.random() < 0.7 ? 2 : 3));
+    mobBatRuns = runs;
+    mobScore += runs;
+    if (runs === 0) mobBatResult = 'MOBS SCORED 0 RUNS';
+    else if (runs === 1) mobBatResult = 'MOBS SCORED 1 RUN!';
+    else mobBatResult = 'MOBS SCORED ' + runs + ' RUNS!';
+}
+
+// =============================================================================
+// DERBY LOGIC
+// =============================================================================
+function derbyHandleHit(outcome, quality) {
+    ballActive = false;
+
+    if (outcome === 'homerun') {
+        derbyHR++;
+        derbyDistance = randInt(380, 480) + (quality === 'perfect' ? randInt(20, 60) : 0);
+        resultMsg = 'HOME RUN!';
+        resultColor = C.GOLD;
+        encourageMsg = derbyDistance + ' FEET!';
+        encourageTimer = 80;
+        SFX.homerun();
+        SFX.cheer(1.5);
+        spawnHRCelebration(W/2, H/2);
+        spawnBlockBreak(getBallScreenPos(1).x, getBallScreenPos(1).y, 25);
+        launchHitBall(1.0, (Math.random()-0.5)*0.5);
+        screenShake = 12;
+    } else if (outcome === 'foul') {
+        resultMsg = 'FOUL!';
+        resultColor = C.ORANGE;
+        SFX.hit(0.3);
+        launchHitBall(0.4, Math.random() < 0.5 ? -2 : 2);
+    } else if (outcome === 'out' || outcome === 'single' || outcome === 'double' || outcome === 'triple') {
+        const hitNames = { out: 'OUT!', single: 'SINGLE', double: 'DOUBLE', triple: 'TRIPLE - CLOSE!' };
+        resultMsg = hitNames[outcome] || outcome.toUpperCase();
+        resultColor = outcome === 'out' ? C.RED : C.CYAN;
+        if (outcome !== 'out') { encourageMsg = 'NOT QUITE!'; encourageTimer = 40; }
+        SFX.hit(outcome === 'triple' ? 2 : 1);
+        launchHitBall(outcome === 'triple' ? 0.8 : 0.5, (Math.random()-0.5)*2);
+        if (outcome === 'triple') spawnBlockBreak(getBallScreenPos(1).x, getBallScreenPos(1).y, 12);
+    } else {
+        resultMsg = 'MISS!';
+        resultColor = C.RED;
+        SFX.strike();
+    }
+
+    derbyPitches++;
+    setPhase('derbyResult', 80);
+}
+
+function derbyHandleMiss() {
+    ballActive = false;
+    resultMsg = 'SWING AND A MISS!';
+    resultColor = C.RED;
+    SFX.strike();
+    derbyPitches++;
+    setPhase('derbyResult', 70);
+}
+
+function derbyHandleNonSwing() {
+    ballActive = false;
+    resultMsg = 'LET IT GO';
+    resultColor = C.GRAY;
+    derbyPitches++;
+    setPhase('derbyResult', 50);
+}
+
+// =============================================================================
+// UPDATE LOOP
+// =============================================================================
+function update(dt) {
+    frameCount++;
+    phaseTimer--;
+    pitchAnnounceTimer--;
+    encourageTimer--;
+
+    // Screen shake decay
+    if (screenShake > 0) {
+        screenShake *= 0.85;
+        screenShakeX = randFloat(-screenShake, screenShake);
+        screenShakeY = randFloat(-screenShake, screenShake);
+        if (screenShake < 0.5) { screenShake = 0; screenShakeX = 0; screenShakeY = 0; }
+    }
+
+    // Update particles
+    updateParticles(dt);
+
+    // Hit ball flight
+    if (phase === 'hitFlight' || phase === 'derbyResult') {
+        hitBallX += hitBallVx * dt;
+        hitBallY += hitBallVy * dt;
+        hitBallVy += 500 * dt; // gravity
+        hitBallSize *= 0.98; // shrink as it goes away
+        if (hitBallSize < 1) hitBallSize = 0;
+    }
+
+    // Phase-specific updates
+    switch(phase) {
+        case 'title':
+            break;
+
+        case 'modeSelect':
+            break;
+
+        case 'getReady':
+            if (phaseTimer <= 0) startWindup();
+            break;
+
+        case 'windup':
+        case 'derbyWindup':
+            if (phaseTimer <= 0) startPitch();
+            break;
+
+        case 'pitch':
+        case 'derbyPitch':
+            updateBall();
+
+            // Handle input buffer
+            if (inputBuffered && !swinging) {
+                doSwing();
+                inputBuffered = false;
+            }
+
+            // Update swing
+            if (swinging) {
+                swingFrame++;
+                if (swingFrame === CONTACT_FRAME) {
+                    if (mode === 'derby') {
+                        // Derby: check contact
+                        const timing = Math.abs(ballT - 1.0);
+                        if (timing > CONTACT_WINDOW) {
+                            derbyHandleMiss();
+                        } else {
+                            let quality;
+                            if (timing <= PERFECT_T) quality = 'perfect';
+                            else if (timing <= GOOD_T) quality = 'good';
+                            else if (timing <= OK_T) quality = 'ok';
+                            else quality = 'weak';
+                            // Derby: boost HR chances
+                            const derbyTable = {
+                                perfect: [['homerun',55],['triple',15],['double',15],['single',10],['out',5]],
+                                good:    [['homerun',30],['triple',10],['double',20],['single',25],['out',15]],
+                                ok:      [['homerun',10],['triple',8],['double',15],['single',22],['out',45]],
+                                weak:    [['foul',35],['single',15],['double',5],['out',45]],
+                            };
+                            const outcome = weightedPick(derbyTable[quality]);
+                            derbyHandleHit(outcome, quality);
+                        }
+                    } else {
+                        checkSwingContact();
+                    }
+                }
+                if (swingFrame >= SWING_FRAMES) {
+                    swinging = false;
+                    swingFrame = 0;
+                }
+            }
+
+            // Ball passed plate without swing (don't interrupt an active swing)
+            if (ballActive && ballT > 1.15 && !swinging) {
+                if (mode === 'derby') {
+                    derbyHandleNonSwing();
+                } else {
+                    handleBallPassedPlate();
+                }
+            }
+            // Cleanup if ball went way past during a completed swing that missed
+            if (ballActive && ballT > 1.5) {
+                ballActive = false;
+            }
+            break;
+
+        case 'hitFlight':
+            if (phaseTimer <= 0) {
+                checkInningProgress();
+                if (phase === 'hitFlight') { // wasn't changed by checkInningProgress
+                    startWindup();
+                }
+            }
+            break;
+
+        case 'resultPause':
+            if (phaseTimer <= 0) {
+                checkInningProgress();
+                if (phase === 'resultPause') {
+                    startWindup();
+                }
+            }
+            break;
+
+        case 'halfOver':
+            if (phaseTimer <= 0) {
+                setPhase('mobBatting', 130);
+                setTimeout(() => simulateMobBatting(), 800);
+            }
+            break;
+
+        case 'mobBatting':
+            if (phaseTimer <= 0) {
+                halfInning = 'top';
+                inning++;
+                if (inning > 3 && playerScore !== mobScore) {
+                    setPhase('gameOver', 0);
+                    if (playerScore > mobScore) { SFX.win(); spawnConfetti(); }
+                    else SFX.gameOver();
+                } else {
+                    currentPitcher = PITCHERS[(inning - 1) % PITCHERS.length];
+                    setPhase('inningChange', 90);
+                }
+                runners = [false, false, false];
+                resetAtBat();
+            }
+            break;
+
+        case 'inningChange':
+            if (phaseTimer <= 0) startWindup();
+            break;
+
+        case 'gameOver':
+            break;
+
+        // Derby phases
+        case 'derbyIntro':
+            if (phaseTimer <= 0) startWindup();
+            break;
+
+        case 'derbyResult':
+            if (phaseTimer <= 0) {
+                if (derbyPitches >= derbyMaxPitches) {
+                    // Save best
+                    if (derbyHR > derbyBestHR) {
+                        derbyBestHR = derbyHR;
+                        try { localStorage.setItem('mcbb_derbyBest', String(derbyBestHR)); } catch(e) {}
+                    }
+                    setPhase('derbyOver', 0);
+                    if (derbyHR > 0) SFX.win(); else SFX.gameOver();
+                } else {
+                    startWindup();
+                }
+            }
+            break;
+
+        case 'derbyOver':
+            break;
+    }
+}
+
+// =============================================================================
+// RENDER
+// =============================================================================
+function render() {
+    ctx.save();
+    ctx.translate(screenShakeX, screenShakeY);
+
+    switch(phase) {
+        case 'title':
+            drawTitle();
+            break;
+
+        case 'modeSelect':
+            drawModeSelect();
+            break;
+
+        case 'getReady':
+            drawSky();
+            drawField();
+            drawPitcherMob(currentPitcher, 0);
+            drawBatter(0);
+            drawGetReady();
+            drawHUD();
+            break;
+
+        case 'windup':
+        case 'derbyWindup': {
+            drawSky();
+            drawField();
+            const wp = 1 - (phaseTimer / 40);
+            drawPitcherMob(currentPitcher, wp);
+            drawBatter(0);
+            drawHUD();
+            break;
+        }
+
+        case 'pitch':
+        case 'derbyPitch': {
+            drawSky();
+            drawField();
+            drawPitcherMob(currentPitcher, ballT < 0.2 ? 0.8 + ballT : 0);
+            drawBall();
+            const sp = swinging ? swingFrame / SWING_FRAMES : 0;
+            drawBatter(sp);
+            drawPitchAnnounce();
+            drawHUD();
+            break;
+        }
+
+        case 'hitFlight':
+        case 'resultPause': {
+            drawSky();
+            drawField();
+            drawPitcherMob(currentPitcher, 0);
+            drawHitBall();
+            const sp2 = swinging ? swingFrame / SWING_FRAMES : (phaseTimer > 50 ? 0.8 : 0);
+            drawBatter(sp2);
+            drawResultMessage();
+            drawHUD();
+            break;
+        }
+
+        case 'derbyResult': {
+            drawSky();
+            drawField();
+            drawPitcherMob(currentPitcher, 0);
+            drawHitBall();
+            drawBatter(phaseTimer > 50 ? 0.7 : 0);
+            drawResultMessage();
+            drawHUD();
+            break;
+        }
+
+        case 'halfOver':
+            drawSky();
+            drawField();
+            ctx.fillStyle = 'rgba(0,0,0,0.4)';
+            ctx.fillRect(0, 0, W, H);
+            drawText('SIDE RETIRED!', W/2, H/2 - 30, 5, C.WHITE, 'center');
+            drawText('3 OUTS', W/2, H/2 + 30, 3, C.RED, 'center');
+            drawHUD();
+            break;
+
+        case 'mobBatting':
+            drawMobBatting();
+            drawHUD();
+            break;
+
+        case 'inningChange':
+            drawInningChange();
+            drawHUD();
+            break;
+
+        case 'gameOver':
+        case 'derbyOver':
+            drawGameOver();
+            break;
+
+        case 'derbyIntro':
+            drawSky();
+            drawField();
+            ctx.fillStyle = 'rgba(0,0,0,0.4)';
+            ctx.fillRect(0, 0, W, H);
+            const s = 6 + Math.sin(frameCount * 0.1) * 0.5;
+            drawText('HOME RUN DERBY!', W/2, H/2 - 50, s, C.GOLD, 'center');
+            drawText('10 PITCHES - GO FOR THE FENCES!', W/2, H/2 + 30, 3, C.WHITE, 'center');
+            drawHUD();
+            break;
+    }
+
+    // Always draw particles on top
+    drawParticles();
+
+    ctx.restore();
+}
+
+// =============================================================================
+// INPUT HANDLING
+// =============================================================================
+function handleAction() {
+    initAudio();
+    switch(phase) {
+        case 'title':
+            SFX.click();
+            setPhase('modeSelect', 0);
+            selectedButton = 0;
+            break;
+
+        case 'modeSelect':
+            SFX.click();
+            if (selectedButton === 0) startNewGame('derby');
+            else startNewGame('full');
+            break;
+
+        case 'pitch':
+        case 'derbyPitch':
+            if (!swinging) {
+                doSwing();
+            } else {
+                inputBuffered = true;
+            }
+            break;
+
+        case 'gameOver':
+        case 'derbyOver':
+            SFX.click();
+            setPhase('title', 0);
+            break;
+    }
+}
+
+function handleUp() {
+    if (phase === 'modeSelect') {
+        selectedButton = (selectedButton + 1) % 2;
+        SFX.click();
+    }
+}
+
+function handleDown() {
+    if (phase === 'modeSelect') {
+        selectedButton = (selectedButton + 1) % 2;
+        SFX.click();
+    }
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    switch(e.code) {
+        case 'Space':
+        case 'Enter':
+            e.preventDefault();
+            handleAction();
+            break;
+        case 'ArrowUp':
+        case 'KeyW':
+            e.preventDefault();
+            handleUp();
+            break;
+        case 'ArrowDown':
+        case 'KeyS':
+            e.preventDefault();
+            handleDown();
+            break;
+    }
+});
+
+// Mouse/touch
+canvas.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (phase === 'modeSelect') {
+        // Check which button was clicked
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = W / rect.width;
+        const scaleY = H / rect.height;
+        const mx = (e.clientX - rect.left) * scaleX;
+        const my = (e.clientY - rect.top) * scaleY;
+        if (my > 190 && my < 290) selectedButton = 0;
+        else if (my > 350 && my < 450) selectedButton = 1;
+    }
+    handleAction();
+});
+
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (phase === 'modeSelect') {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = W / rect.width;
+        const scaleY = H / rect.height;
+        const touch = e.touches[0];
+        const mx = (touch.clientX - rect.left) * scaleX;
+        const my = (touch.clientY - rect.top) * scaleY;
+        if (my > 190 && my < 290) selectedButton = 0;
+        else if (my > 350 && my < 450) selectedButton = 1;
+    }
+    handleAction();
+}, { passive: false });
+
+// =============================================================================
+// MAIN LOOP
+// =============================================================================
+const TARGET_DT = 1 / 60;
+let lastTime = 0;
+let accumulator = 0;
+
+function gameLoop(timestamp) {
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+    lastTime = timestamp;
+    accumulator += dt;
+
+    while (accumulator >= TARGET_DT) {
+        update(TARGET_DT);
+        accumulator -= TARGET_DT;
+    }
+
+    render();
+    requestAnimationFrame(gameLoop);
+}
+
+// Start
+requestAnimationFrame((t) => {
+    lastTime = t;
+    requestAnimationFrame(gameLoop);
+});
+
+</script>
+</body>
+</html>
